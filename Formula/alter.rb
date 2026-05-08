@@ -1,18 +1,19 @@
-# Homebrew Formula scaffold for @truealter/cli.
+# Homebrew Formula for @truealter/cli.
 #
-# Destination: true-alter/homebrew-tap:Formula/alter.rb (the tap repo
-# does not exist yet; create it when flipping alter-cli public).
+# Source of truth: this file. The scaffold copy at
+# `true-alter/alter-cli:packaging/homebrew/Formula/alter.rb` is a staging
+# area kept in step with this Formula via a sync commit per release.
 #
-# Post-publish flow:
+# Post-publish flow (per release):
 #   1. Compute the tarball SHA256:
 #        curl -fsSL https://registry.npmjs.org/@truealter/cli/-/cli-<ver>.tgz \
 #          | sha256sum
 #      (or read the `integrity` field from
 #      https://registry.npmjs.org/@truealter/cli/<ver> and decode
-#      the base64-encoded sha512 -- sha256 is preferred for Formula).
+#      the base64-encoded sha512 — sha256 is preferred for Formula).
 #   2. Update the `url` + `sha256` below for the released version.
-#   3. Commit to the tap repo. `brew install truealter/tap/alter` then
-#      resolves against the new Formula.
+#   3. Commit to this tap repo. `brew install truealter/tap/alter` then
+#      resolves against the new Formula on the next `brew update`.
 #
 # `std_npm_args` requires Homebrew >= 4.0 and handles node dependency
 # resolution + PATH setup. `bin.install_symlink` exposes `alter` on
@@ -21,8 +22,8 @@
 class Alter < Formula
   desc "ALTER identity CLI -- login once, authenticated everywhere"
   homepage "https://truealter.com"
-  url "https://registry.npmjs.org/@truealter/cli/-/cli-0.2.1.tgz"
-  sha256 "560f9da8cb6eb46f26c65b4d8c680b2da707f1daf70625a6940020cddd02b5a4"
+  url "https://registry.npmjs.org/@truealter/cli/-/cli-0.4.8.tgz"
+  sha256 "37ff7fc7bd304e5a476b46fc54b96cd99646cece671450d51978bd634c5ff7e3"
   license "Apache-2.0"
 
   depends_on "node"

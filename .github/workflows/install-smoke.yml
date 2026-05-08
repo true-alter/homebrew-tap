@@ -1,0 +1,88 @@
+name: install-smoke
+
+# End-to-end smoke test for `brew tap truealter/tap` + `brew install
+# truealter/tap/alter`. Runs on macos-latest (real Homebrew, not
+# Linuxbrew) so the verification matches what a member install path
+# actually exercises. Manual workflow_dispatch + automatic on every
+# main push so the tap can never silently regress against a published
+# npm tarball it pins.
+#
+# Self-contained: nothing here depends on tap-repo state beyond the
+# Formula at HEAD. Forks of this repo can run the same job without
+# special permissions.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "Formula/**"
+      - ".github/workflows/install-smoke.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  install-smoke:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - name: Tap truealter/tap from this checkout
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Tap directly from the canonical github URL — Homebrew resolves
+          # `truealter/tap` → `github.com/truealter/homebrew-tap` by
+          # default, so the explicit https URL avoids that resolver path
+          # while still exercising the same Formula file the public
+          # path would.
+          brew tap truealter/tap "https://github.com/${GITHUB_REPOSITORY}.git"
+          brew tap
+
+      - name: Install alter
+        run: |
+          set -euo pipefail
+          brew install --verbose truealter/tap/alter
+
+      - name: Verify alter binary on PATH + help text shape
+        run: |
+          set -euo pipefail
+          which alter
+          alter --version || true
+          alter --help | head -20
+          alter --help | grep -q "alter" || {
+            echo "::error::alter --help output does not contain 'alter'"
+            exit 1
+          }
+
+      - name: Verify retry helper landed in the installed bundle
+        # Sanity check that the v0.4.8 OAuth retry helper (the headline
+        # change in this tap bump) actually shipped through to the
+        # installed tarball. If the tap pins to a tarball that pre-dates
+        # the helper, the install would silently succeed but the fix
+        # would be missing.
+        run: |
+          set -euo pipefail
+          alter_bin=$(which alter)
+          alter_libexec=$(dirname "$alter_bin")/../libexec
+          if [ -f "$alter_libexec/lib/node_modules/@truealter/cli/dist/lib/fetch-with-retry.js" ]; then
+            echo "fetch-with-retry.js present"
+          else
+            # Path layout differs slightly between Homebrew versions;
+            # fall back to find under HOMEBREW_PREFIX.
+            found=$(find "$(brew --prefix)" -name "fetch-with-retry.js" -path "*/@truealter/*" 2>/dev/null | head -1 || true)
+            if [ -z "$found" ]; then
+              echo "::error::fetch-with-retry.js missing from installed bundle"
+              find "$(brew --prefix)" -path "*@truealter*" -name "*.js" | head -20
+              exit 1
+            fi
+            echo "fetch-with-retry.js present at $found"
+          fi
+
+      - name: Uninstall + clean for hygiene
+        if: always()
+        run: |
+          brew uninstall --force truealter/tap/alter || true
+          brew untap truealter/tap || true

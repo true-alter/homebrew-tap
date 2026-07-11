@@ -3,16 +3,30 @@ name: install-smoke
 # End-to-end smoke test for `brew tap truealter/tap` + `brew install
 # truealter/tap/alter`. Runs on macos-latest (real Homebrew, not
 # Linuxbrew) so the verification matches what a member install path
-# actually exercises. Manual workflow_dispatch + automatic on every
-# main push so the tap can never silently regress against a published
-# npm tarball it pins.
+# actually exercises.
+#
+# This tap IS the public install channel: whatever lands on main is what
+# `brew install truealter/tap/alter` serves. The smoke test used to run
+# only AFTER a push to main, so a broken Formula merged first and was
+# tested second — by which point `brew install` was already serving it.
+# It now runs on every pull request as well, before the merge, and is a
+# required check on main.
+#
+# No `paths:` filter on the pull_request trigger, deliberately. A
+# path-filtered required check does not report on a PR that misses the
+# filter, and a required check that never reports blocks that PR forever
+# with no red mark to explain it. The tap sees a handful of PRs a year,
+# so running the job on all of them costs nothing next to that failure.
 #
 # Self-contained: nothing here depends on tap-repo state beyond the
-# Formula at HEAD. Forks of this repo can run the same job without
+# Formula under test. Forks of this repo can run the same job without
 # special permissions.
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches:
+      - main
   push:
     branches:
       - main
@@ -31,6 +45,7 @@ jobs:
       - name: Tap truealter/tap from this checkout
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
           # Tap directly from the canonical github URL — Homebrew resolves
@@ -39,6 +54,25 @@ jobs:
           # while still exercising the same Formula file the public
           # path would.
           brew tap truealter/tap "https://github.com/${GITHUB_REPOSITORY}.git"
+
+          # `brew tap` clones the DEFAULT branch. On a pull request that is
+          # main, i.e. the Formula the PR is trying to REPLACE — so the job
+          # would install the old Formula, pass, and report green while the
+          # proposed one went entirely untested. A green that proves nothing
+          # is worse than no check at all, and as a required check it would
+          # be actively misleading. Pin the tap clone to the PR head so the
+          # Formula under test is the one being proposed.
+          #
+          # refs/pull/N/head (not the head SHA against origin) so this works
+          # for fork PRs too: the base repo always carries that ref, a fork's
+          # branch is not fetchable from origin.
+          if [ -n "${PR_NUMBER:-}" ]; then
+            tap_dir="$(brew --repo truealter/tap)"
+            git -C "$tap_dir" fetch --depth 1 origin "refs/pull/${PR_NUMBER}/head"
+            git -C "$tap_dir" checkout --detach FETCH_HEAD
+            echo "tap pinned to PR #${PR_NUMBER} head: $(git -C "$tap_dir" rev-parse HEAD)"
+          fi
+
           brew tap
 
       - name: Install alter

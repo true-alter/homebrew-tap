@@ -22,8 +22,8 @@
 class Alter < Formula
   desc "~Alter identity CLI -- login once, authenticated everywhere"
   homepage "https://truealter.com"
-  url "https://registry.npmjs.org/@truealter/cli/-/cli-0.8.34.tgz"
-  sha256 "736936504588bf37ffcd45ebd9818709e87542fd5b804694f856632e68df236e"
+  url "https://registry.npmjs.org/@truealter/cli/-/cli-0.8.35.tgz"
+  sha256 "73eb167a299fe2bbffc354479da07c2ae2a2f8a8ea333a084c5dab1ff84f8a4b"
   license "Apache-2.0"
 
   depends_on "node"

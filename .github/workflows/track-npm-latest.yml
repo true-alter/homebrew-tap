@@ -1,0 +1,164 @@
+# Track the published CLI and propose the Formula bump.
+#
+# This tap IS the public install channel: whatever sits on main is what
+# `brew install truealter/tap/alter` serves. Until now the Formula was bumped by
+# hand, in a PR someone had to remember to open, so the channel drifted behind
+# npm silently. It sat on 0.8.33 while npm served 0.8.34, which meant a member
+# installing by brew got a CLI with no `alter register` command at all: the one
+# command the whole activation path depends on. Nothing went red, because a
+# channel that is merely OLD looks exactly like a channel that is current.
+#
+# So the tap watches npm itself. Every day it reads the published `latest`, and
+# when the Formula disagrees it opens a pull request with the new url and sha256.
+# The existing install-smoke job then runs against that PR on real macOS before
+# anyone can merge it, so a bad bump is caught on the way in rather than served.
+#
+# It PROPOSES, it never merges. This is a public channel and the merge is a human
+# act, per the pre-launch freeze on public-channel releases.
+#
+# No credential of any kind. The job reads the public npm registry and writes to
+# its own repository with the workflow's own GITHUB_TOKEN, so there is no
+# cross-repo token to mint, scope, or rotate. That is why the watcher lives HERE
+# rather than in the release pipeline that publishes to npm: the release repo
+# would need write access to this one, and the cheapest way to hold no credential
+# is to need none.
+
+name: track-npm-latest
+
+permissions:
+  contents: write
+  pull-requests: write
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Daily. A release lands when it lands; a day is the most a member should
+    # ever wait on the brew channel, and one short job a day is the whole cost.
+    - cron: "17 6 * * *"
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    name: Open a Formula bump when npm moves ahead
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the tap
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Read the published version and the pinned version
+        id: read
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          published=$(curl -fsSL https://registry.npmjs.org/@truealter/cli/latest \
+              | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')
+          pinned=$(grep -oE 'cli-[0-9]+\.[0-9]+\.[0-9]+\.tgz' Formula/alter.rb \
+              | head -1 | sed -E 's/^cli-(.*)\.tgz$/\1/')
+
+          if [ -z "$published" ] || [ -z "$pinned" ]; then
+              echo "::error::Could not read published ('$published') or pinned ('$pinned') version."
+              exit 1
+          fi
+
+          echo "published=$published" >> "$GITHUB_OUTPUT"
+          echo "pinned=$pinned" >> "$GITHUB_OUTPUT"
+          echo "::notice::npm serves ${published}; the Formula pins ${pinned}."
+
+      - name: Verify the tarball against npm's own integrity digest, then hash it
+        id: hash
+        if: steps.read.outputs.published != steps.read.outputs.pinned
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.read.outputs.published }}"
+
+          curl -fsSL "https://registry.npmjs.org/@truealter/cli/-/cli-${version}.tgz" -o cli.tgz
+
+          # The registry publishes an integrity digest for the tarball it serves.
+          # Check the bytes we downloaded against it, so the Formula can never pin
+          # the digest of something the registry does not actually hand a member.
+          # Pure shell on purpose: this runs inside a YAML block scalar, where an
+          # embedded Python heredoc would arrive uniformly indented and die on it.
+          integrity=$(curl -fsSL https://registry.npmjs.org/@truealter/cli/latest \
+              | python3 -c 'import json,sys; print(json.load(sys.stdin)["dist"]["integrity"])')
+
+          case "$integrity" in
+              sha512-*) ;;
+              *) echo "::error::Unexpected integrity algorithm: ${integrity}"; exit 1 ;;
+          esac
+
+          want="${integrity#sha512-}"
+          got=$(openssl dgst -sha512 -binary cli.tgz | base64 -w0)
+          if [ "$got" != "$want" ]; then
+              echo "::error::Tarball does not match the registry's integrity digest. Refusing to pin it."
+              exit 1
+          fi
+          echo "::notice::Integrity verified against the registry digest."
+
+          echo "sha256=$(sha256sum cli.tgz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          rm -f cli.tgz
+
+      - name: Open the bump pull request
+        if: steps.read.outputs.published != steps.read.outputs.pinned
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PINNED: ${{ steps.read.outputs.pinned }}
+          PUBLISHED: ${{ steps.read.outputs.published }}
+          SHA256: ${{ steps.hash.outputs.sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          branch="bump/cli-${PUBLISHED}"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+              echo "::notice::${branch} already exists; the bump is already proposed."
+              exit 0
+          fi
+
+          sed -i -E \
+              -e "s#(url \"https://registry\.npmjs\.org/@truealter/cli/-/cli-)[0-9]+\.[0-9]+\.[0-9]+(\.tgz\")#\1${PUBLISHED}\2#" \
+              -e "s#^(  sha256 \")[0-9a-f]{64}(\")#\1${SHA256}\2#" \
+              Formula/alter.rb
+
+          if git diff --quiet -- Formula/alter.rb; then
+              echo "::error::Nothing changed in the Formula. The url or sha256 line did not match the expected shape."
+              exit 1
+          fi
+
+          git config user.name "alter-tap-bump"
+          git config user.email "noreply@truealter.com"
+          git checkout -b "$branch"
+          git add Formula/alter.rb
+
+          # Build the message with printf, never a heredoc: this runs inside a YAML
+          # block scalar, so every heredoc line would carry the block's indentation
+          # into the commit message, and an indented trailer is not a trailer. The
+          # gate on this repo parses these lines, and it parses them at column zero.
+          #
+          # Acted-By names the person accountable; Executed-By names the automated
+          # agent that ran it. The gate fails a bot handle in the Acted-By slot, and
+          # rightly: a bot is operated, it cannot own a decision.
+          msg=$(printf '%s\n\n%s\n\n%s\n%s\n' \
+              "chore(homebrew): bump alter CLI formula ${PINNED} -> ${PUBLISHED}" \
+              "npm serves ${PUBLISHED}; this tap served ${PINNED}, so a member installing by brew was getting an older CLI than every other channel. Opened by the watcher, with the tarball verified against the registry's integrity digest before its sha256 was pinned." \
+              "Acted-By: ~blake <blake@truealter.com>" \
+              "Executed-By: ~tap-bump.bot")
+
+          git commit -q -m "$msg"
+          git push -q origin "$branch"
+
+          body=$(printf '%s\n\n%s\n\n%s\n' \
+              "npm serves \`${PUBLISHED}\`; this tap pins \`${PINNED}\`." \
+              "The tarball was verified against the registry's own integrity digest before its sha256 was pinned, so the Formula cannot point at bytes npm does not serve." \
+              "install-smoke runs against this PR on real macOS. Merge is a human act: this tap is the public install channel, and whatever lands on main is what \`brew install truealter/tap/alter\` serves from that moment.")
+
+          gh pr create \
+              --base main \
+              --head "$branch" \
+              --title "chore(homebrew): bump alter CLI formula ${PINNED} -> ${PUBLISHED}" \
+              --body "$body"
